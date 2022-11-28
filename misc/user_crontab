@@ -1,0 +1,13 @@
+# Edit this file to introduce tasks to be run by user-specific cron.
+#
+# Load (overwriting everything prior!!!) as:
+#  crontab - < misc/user_crontab
+#
+# Test for pending changes:
+#  diff -w -U0 misc/user_crontab <( crontab -l ) | less -S
+#
+GOLOG_LOG_FMT=json
+
+# If another process is running, the lock is silently observed without logging anything
+* * * * *     $HOME/fil-naive-marketwatch/misc/log_and_run.bash cron_track-deals.log.ndjson        $HOME/fil-naive-marketwatch/bin/marketwatch-cron track-deals
+* * * * *     $HOME/fil-naive-marketwatch/misc/log_and_run.bash cron_poll-providers.log.ndjson     $HOME/fil-naive-marketwatch/bin/marketwatch-cron poll-providers
