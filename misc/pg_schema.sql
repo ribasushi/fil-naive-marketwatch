@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS naive.published_deals (
   start_epoch INTEGER NOT NULL CONSTRAINT deal_valid_start CHECK ( start_epoch > 0 ),
   end_epoch INTEGER NOT NULL CONSTRAINT deal_valid_end CHECK ( end_epoch > 0 ),
   sector_start_epoch INTEGER CONSTRAINT deal_valid_sector_start CHECK ( sector_start_epoch > 0 ),
+  sector_start_rounded INTEGER GENERATED ALWAYS AS ( ( sector_start_epoch - 240 ) / 2880 * 2880 + 240 ) STORED, -- 2h +/- because network started at 22:00 UTC
   entry_created TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS published_deals_piece_id_idx ON naive.published_deals ( piece_id );
