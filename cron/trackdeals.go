@@ -15,21 +15,27 @@ import (
 	"github.com/georgysavva/scany/pgxscan"
 	"github.com/ipfs/go-cid"
 	"github.com/jackc/pgx/v4"
-	cmn "github.com/ribasushi/fil-naive-marketwatch/common"
-	"github.com/urfave/cli/v2"
+	"github.com/ribasushi/go-toolbox-interplanetary/fil"
+	"github.com/ribasushi/go-toolbox/cmn"
+	"github.com/ribasushi/go-toolbox/ufcli"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/xerrors"
 )
 
-var trackDeals = &cli.Command{
+const (
+	filDefaultLookback = uint(10)
+)
+
+var lotusLookbackEpochs = filDefaultLookback
+
+var trackDeals = &ufcli.Command{
 	Usage: "Track state of filecoin deals related to known PieceCIDs",
 	Name:  "track-deals",
-	Flags: []cli.Flag{},
-	Action: func(cctx *cli.Context) error {
+	Flags: []ufcli.Flag{},
+	Action: func(cctx *ufcli.Context) error {
+		ctx, log, db, lapi := UnpackCtx(cctx.Context)
 
-		ctx := cctx.Context
-
-		curTipset, err := cmn.DefaultLookbackTipset(ctx)
+		curTipset, err := fil.GetTipset(ctx, lapi, filabi.ChainEpoch(lotusLookbackEpochs))
 		if err != nil {
 			return cmn.WrErr(err)
 		}
@@ -39,7 +45,7 @@ var trackDeals = &cli.Command{
 		go func() {
 			defer close(dealQueryDone)
 			log.Infow("retrieving Market Deals from", "state", curTipset.Key(), "epoch", curTipset.Height(), "wallTime", time.Unix(int64(curTipset.Blocks()[0].Timestamp), 0))
-			stateDeals, err = cmn.LotusAPIHeavy.StateMarketDeals(ctx, curTipset.Key())
+			stateDeals, err = lapi.StateMarketDeals(ctx, curTipset.Key())
 			if err != nil {
 				dealQueryDone <- cmn.WrErr(err)
 				return
@@ -55,7 +61,7 @@ var trackDeals = &cli.Command{
 		// entries from this list are deleted below as we process the new state
 		initialDbDeals := make(map[int64]filDeal)
 
-		rows, err := cmn.Db.Query(
+		rows, err := db.Query(
 			ctx,
 			`
 			SELECT pd.deal_id, p.piece_cid, pd.status
@@ -109,8 +115,8 @@ var trackDeals = &cli.Command{
 		type deal struct {
 			*lotusapi.MarketDeal
 			dealID            int64
-			providerID        cmn.ActorID
-			clientID          cmn.ActorID
+			providerID        fil.ActorID
+			clientID          fil.ActorID
 			pieceLog2Size     uint8
 			prevState         *filDeal
 			sectorStart       *filabi.ChainEpoch
@@ -202,11 +208,11 @@ var trackDeals = &cli.Command{
 				return cmn.WrErr(err)
 			}
 
-			d.clientID, err = cmn.ParseActorString(d.Proposal.Client.String())
+			d.clientID, err = fil.ParseActorString(d.Proposal.Client.String())
 			if err != nil {
 				return cmn.WrErr(err)
 			}
-			d.providerID, err = cmn.ParseActorString(d.Proposal.Provider.String())
+			d.providerID, err = fil.ParseActorString(d.Proposal.Provider.String())
 			if err != nil {
 				return cmn.WrErr(err)
 			}
@@ -233,7 +239,7 @@ var trackDeals = &cli.Command{
 			humanize.Comma(int64(len(toFail))),
 		)
 
-		if err := cmn.Db.BeginTxFunc(ctx, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if err := db.BeginTxFunc(ctx, pgx.TxOptions{}, func(tx pgx.Tx) error {
 
 			for _, c := range toID {
 				if _, err := tx.Exec(
@@ -347,10 +353,10 @@ var trackDeals = &cli.Command{
 			return cmn.WrErr(err)
 		}
 
-		clientsToAddress := make([]cmn.ActorID, 0, len(seenClients))
+		clientsToAddress := make([]fil.ActorID, 0, len(seenClients))
 		if err := pgxscan.Select(
 			ctx,
-			cmn.Db,
+			db,
 			&clientsToAddress,
 			`
 			SELECT client_id FROM naive.clients WHERE client_address IS NULL
@@ -365,11 +371,11 @@ var trackDeals = &cli.Command{
 		for _, clID := range clientsToAddress {
 			clID := clID
 			eg.Go(func() error {
-				robust, err := cmn.LotusAPICurState.StateAccountKey(ctx, clID.AsFilAddr(), curTipset.Key())
+				robust, err := lapi.StateAccountKey(ctx, clID.AsFilAddr(), curTipset.Key())
 				if err != nil {
 					return cmn.WrErr(err)
 				}
-				_, err = cmn.Db.Exec(
+				_, err = db.Exec(
 					ctx,
 					`
 					UPDATE naive.clients SET

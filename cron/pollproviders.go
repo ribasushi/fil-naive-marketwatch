@@ -13,11 +13,12 @@ import (
 	lotustypes "github.com/filecoin-project/lotus/chain/types"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/georgysavva/scany/pgxscan"
-	lp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
-	cmn "github.com/ribasushi/fil-naive-marketwatch/common"
-	"github.com/ribasushi/fil-naive-marketwatch/infomempeerstore"
-	"github.com/urfave/cli/v2"
+	infomempeerstore "github.com/ribasushi/go-libp2p-infomempeerstore"
+	"github.com/ribasushi/go-toolbox-interplanetary/fil"
+	"github.com/ribasushi/go-toolbox-interplanetary/lp2p"
+	"github.com/ribasushi/go-toolbox/cmn"
+	"github.com/ribasushi/go-toolbox/ufcli"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -29,7 +30,7 @@ const (
 type spInfo struct {
 	Errors             []string                         `json:"errors,omitempty"`
 	SectorLog2Size     uint8                            `json:"sector_log2_size"`
-	PeerID             *lp2ppeer.ID                     `json:"peerid"`
+	PeerID             *lp2p.PeerID                     `json:"peerid"`
 	MultiAddrs         []multiaddr.Multiaddr            `json:"multiaddrs"`
 	PeerInfo           *infomempeerstore.PeerData       `json:"peer_info,omitempty"`
 	RetrievalProtocols map[string][]multiaddr.Multiaddr `json:"retrieval_protocols,omitempty"`
@@ -55,35 +56,35 @@ var (
 	pollTimeout     int
 )
 
-var pollProviders = &cli.Command{
+var pollProviders = &ufcli.Command{
 	Usage: "Query metadata of recently-seen storage providers",
 	Name:  "poll-providers",
-	Flags: []cli.Flag{
-		&cli.BoolFlag{
+	Flags: []ufcli.Flag{
+		&ufcli.BoolFlag{
 			Name:        "requery-all",
 			Usage:       "Query every SP that is known to the app",
 			Destination: &pollRequeryAll,
 		},
-		&cli.IntFlag{
+		&ufcli.IntFlag{
 			Name:        "query-concurrency",
 			Usage:       "How many SPs to query concurrently",
 			Value:       64,
 			Destination: &pollConcurrency,
 		},
-		&cli.IntFlag{
+		&ufcli.IntFlag{
 			Name:        "query-timeout",
 			Usage:       "Query timeout in seconds",
 			Value:       10,
 			Destination: &pollTimeout,
 		},
 	},
-	Action: func(cctx *cli.Context) error {
-		ctx := cctx.Context
+	Action: func(cctx *ufcli.Context) error {
+		ctx, log, db, _ := UnpackCtx(cctx.Context)
 
-		allSPs := make([]cmn.ActorID, 0, 2<<10)
+		allSPs := make([]fil.ActorID, 0, 2<<10)
 		if err := pgxscan.Select(
 			ctx,
-			cmn.Db,
+			db,
 			&allSPs,
 			`
 			SELECT p.provider_id
@@ -94,7 +95,7 @@ var pollProviders = &cli.Command{
 					OR
 				pi.provider_last_polled < NOW() - '3 hours'::INTERVAL
 			ORDER BY RANDOM()
-			LIMIT 50
+			LIMIT 128
 			`,
 		); err != nil {
 			return cmn.WrErr(err)
@@ -145,7 +146,7 @@ var pollProviders = &cli.Command{
 					atomic.AddInt32(totals.lacksV120, 1)
 				}
 
-				_, err = cmn.Db.Exec(
+				_, err = db.Exec(
 					ctx,
 					`
 					INSERT INTO naive.providers_info
@@ -170,10 +171,12 @@ var pollProviders = &cli.Command{
 }
 
 func getSPInfo(ctx context.Context, sp filaddr.Address, timeOut time.Duration) (spInfo, error) {
+	_, log, _, lapi := UnpackCtx(ctx)
+
 	ctx, ctxCloser := context.WithTimeout(ctx, timeOut)
 	defer ctxCloser()
 
-	mi, err := cmn.LotusAPICurState.StateMinerInfo(ctx, sp, lotustypes.EmptyTSK)
+	mi, err := lapi.StateMinerInfo(ctx, sp, lotustypes.EmptyTSK)
 	if err != nil {
 		return spInfo{}, cmn.WrErr(err)
 	}
@@ -207,7 +210,7 @@ func getSPInfo(ctx context.Context, sp filaddr.Address, timeOut time.Duration) (
 		return spi, nil
 	}
 
-	nodeHost, peerStore, err := newLp2pNode(timeOut)
+	nodeHost, peerStore, err := lp2p.NewPlainNodeTCP(timeOut)
 	if err != nil {
 		return spInfo{}, cmn.WrErr(err)
 	}
@@ -223,7 +226,7 @@ func getSPInfo(ctx context.Context, sp filaddr.Address, timeOut time.Duration) (
 	nodeHost.ConnManager().Protect(*spi.PeerID, pTag)
 	defer nodeHost.ConnManager().Unprotect(*spi.PeerID, pTag)
 	t0 := time.Now()
-	err = nodeHost.Connect(ctx, lp2ppeer.AddrInfo{
+	err = nodeHost.Connect(ctx, lp2p.AddrInfo{
 		ID:    *spi.PeerID,
 		Addrs: spi.MultiAddrs,
 	})
@@ -280,7 +283,7 @@ func getSPInfo(ctx context.Context, sp filaddr.Address, timeOut time.Duration) (
 		}
 
 		respRetTrans := new(retrievalTransports100RawResponse)
-		if err := lp2pRPC(
+		if err := lp2p.DoCborRPC(
 			ctxEg,
 			nodeHost,
 			*spi.PeerID,
