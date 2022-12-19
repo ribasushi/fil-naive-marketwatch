@@ -22,9 +22,21 @@ import (
 	"golang.org/x/xerrors"
 )
 
+type dealState int16
+
 const (
 	filDefaultLookback = uint(10)
+
+	dealPublished  = dealState(1)
+	dealActive     = dealState(3)
+	dealTerminated = dealState(8)
 )
+
+var dealStateLabel = map[dealState]string{
+	dealPublished:  "published",
+	dealActive:     "active",
+	dealTerminated: "terminated",
+}
 
 var lotusLookbackEpochs = filDefaultLookback
 
@@ -55,7 +67,7 @@ var trackDeals = &ufcli.Command{
 
 		type filDeal struct {
 			pieceCid cid.Cid
-			status   string
+			state    dealState
 		}
 
 		// entries from this list are deleted below as we process the new state
@@ -64,7 +76,7 @@ var trackDeals = &ufcli.Command{
 		rows, err := db.Query(
 			ctx,
 			`
-			SELECT pd.deal_id, p.piece_cid, pd.status
+			SELECT pd.deal_id, p.piece_cid, pd.state
 				FROM naive.published_deals pd
 				JOIN naive.pieces p USING ( piece_id )
 			`,
@@ -78,7 +90,7 @@ var trackDeals = &ufcli.Command{
 			var d filDeal
 			var pcidStr string
 
-			if err = rows.Scan(&dID, &pcidStr, &d.status); err != nil {
+			if err = rows.Scan(&dID, &pcidStr, &d.state); err != nil {
 				return cmn.WrErr(err)
 			}
 			if d.pieceCid, err = cid.Parse(pcidStr); err != nil {
@@ -120,7 +132,7 @@ var trackDeals = &ufcli.Command{
 			pieceLog2Size     uint8
 			prevState         *filDeal
 			sectorStart       *filabi.ChainEpoch
-			status            string
+			state             dealState
 			terminationReason string
 			decodedLabel      *string
 			label             []byte
@@ -134,7 +146,7 @@ var trackDeals = &ufcli.Command{
 
 			d := deal{
 				MarketDeal: protoDeal,
-				status:     "published", // always begin as "published" adjust accordingly below
+				state:      dealPublished, // always begin as "published" adjust accordingly below
 			}
 
 			d.dealID, err = strconv.ParseInt(dealIDString, 10, 64)
@@ -154,29 +166,29 @@ var trackDeals = &ufcli.Command{
 			seenClients[d.Proposal.Client] = struct{}{}
 
 			if d.State.SlashEpoch != -1 {
-				d.status = "terminated"
+				d.state = dealTerminated
 				d.terminationReason = "entered on-chain final-slashed state"
 			} else if d.State.SectorStartEpoch > 0 {
 				d.sectorStart = &d.State.SectorStartEpoch
-				d.status = "active"
+				d.state = dealActive
 			} else if d.Proposal.StartEpoch+filbuiltin.EpochsInDay < curTipset.Height() { // FIXME replace with DealUpdatesInterval
 				// if things are that late: they are never going to make it
-				d.status = "terminated"
+				d.state = dealTerminated
 				d.terminationReason = "containing sector missed expected sealing epoch"
 			}
 
-			dealCountsByState[d.status]++
+			dealCountsByState[dealStateLabel[d.state]]++
 			if d.prevState == nil {
-				if d.status == "terminated" {
+				if d.state == dealTerminated {
 					dealCountsByState["terminatedNewDirect"]++
-				} else if d.status == "active" {
+				} else if d.state == dealActive {
 					dealCountsByState["activeNewDirect"]++
 				} else {
 					dealCountsByState["publishedNew"]++
 				}
 				toUpsert = append(toUpsert, &d)
-			} else if d.status != d.prevState.status {
-				dealCountsByState[d.status+"New"]++
+			} else if d.state != d.prevState.state {
+				dealCountsByState[dealStateLabel[d.state]+"New"]++
 				toUpsert = append(toUpsert, &d)
 			}
 		}
@@ -227,7 +239,7 @@ var trackDeals = &ufcli.Command{
 		// whatever remains here is gone from the state entirely
 		for dID, d := range initialDbDeals {
 			dealCountsByState["terminated"]++
-			if d.status != "terminated" {
+			if d.state != dealTerminated {
 				dealCountsByState["terminatedNew"]++
 				toFail = append(toFail, dID)
 			}
@@ -258,13 +270,13 @@ var trackDeals = &ufcli.Command{
 					ctx,
 					`
 					INSERT INTO naive.published_deals
-						( piece_id, deal_id, client_id, provider_id, claimed_log2_size, label, decoded_label, is_filplus, status, published_deal_meta, start_epoch, end_epoch, sector_start_epoch )
+						( piece_id, deal_id, client_id, provider_id, claimed_log2_size, label, decoded_label, is_filplus, state, published_deal_meta, start_epoch, end_epoch, sector_start_epoch )
 						VALUES (
 							( SELECT piece_id FROM naive.pieces WHERE piece_cid = $1 ),
 							$2, $3, $4, $5, $6, $7, $8, $9, $10::JSONB, $11, $12, $13
 						)
 					ON CONFLICT ( deal_id ) DO UPDATE SET
-						status = EXCLUDED.status,
+						state = EXCLUDED.state,
 						published_deal_meta = naive.published_deals.published_deal_meta || EXCLUDED.published_deal_meta,
 						sector_start_epoch = COALESCE( EXCLUDED.sector_start_epoch, naive.published_deals.sector_start_epoch )
 					`,
@@ -276,7 +288,7 @@ var trackDeals = &ufcli.Command{
 					d.label,
 					d.decodedLabel,
 					d.Proposal.VerifiedDeal,
-					d.status,
+					d.state,
 					d.metaJSONB,
 					d.Proposal.StartEpoch,
 					d.Proposal.EndEpoch,
@@ -292,13 +304,14 @@ var trackDeals = &ufcli.Command{
 					ctx,
 					`
 					UPDATE naive.published_deals SET
-						status = 'terminated',
+						state = $1,
 						published_deal_meta = published_deal_meta || '{ "termination_reason":"deal no longer part of market-actor state" }'
 					WHERE
-						deal_id = ANY ( $1::BIGINT[] )
+						deal_id = ANY ( $2::BIGINT[] )
 							AND
-						status != 'terminated'
+						state != $1
 					`,
+					dealTerminated,
 					toFail,
 				); err != nil {
 					return cmn.WrErr(err)
@@ -319,13 +332,14 @@ var trackDeals = &ufcli.Command{
 								AND
 							pd.piece_id = p.piece_id
 								AND
-							pd.status = 'active'
+							pd.state = $1
 					) active
 				WHERE
 					pieces.proven_log2_size IS NULL
 						AND
 					pieces.piece_id = active.piece_id
 				`,
+				dealActive,
 			); err != nil {
 				return cmn.WrErr(err)
 			}

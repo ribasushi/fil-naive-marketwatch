@@ -22,9 +22,9 @@ Some notes on data model in no particular order:
 
   `SELECT ts_from_epoch( ( metadata->'market_state'->'epoch' )::INTEGER ) FROM global;`
 
-- Deal lifecycles stored in `published_deals.status` go in one direction only:
+- Deal lifecycles stored in `published_deals.state`/`published_deals.status` go in one direction only:
 
-  `published` => (ideally) `active` => `terminated`
+  `(1)published` => (ideally) `(3)active` => `(8)terminated`
 
 - `providers_info` contains the results of randomly polling a subset of providers that have ever made a deal. Dig through the `info` JSONB for various interesting stats.
 

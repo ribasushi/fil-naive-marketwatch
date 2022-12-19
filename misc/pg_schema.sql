@@ -132,13 +132,18 @@ CREATE OR REPLACE TRIGGER trigger_update_provider_info
 CREATE TABLE IF NOT EXISTS naive.published_deals (
   deal_id BIGINT UNIQUE NOT NULL CONSTRAINT deal_valid_id CHECK ( deal_id > 0 ),
   piece_id BIGINT NOT NULL REFERENCES naive.pieces ( piece_id ) ON UPDATE CASCADE,
-  claimed_log2_size BIGINT NOT NULL CONSTRAINT piece_valid_size CHECK ( claimed_log2_size > 0 ),
   provider_id INTEGER NOT NULL REFERENCES naive.providers ( provider_id ),
   client_id INTEGER NOT NULL REFERENCES naive.clients ( client_id ),
+  claimed_log2_size SMALLINT NOT NULL CONSTRAINT piece_valid_size CHECK ( claimed_log2_size > 0 ),
+  state SMALLINT NOT NULL CONSTRAINT deal_valid_state CHECK ( state IN ( 1, 3, 8 ) ), -- see status GENERATED below
   label BYTEA NOT NULL,
   decoded_label TEXT CONSTRAINT deal_valid_label_cid CHECK ( naive.looks_like_cid( decoded_label ) ),
   is_filplus BOOL NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL GENERATED ALWAYS AS ( CASE state
+    WHEN 1 THEN 'published'
+    WHEN 3 THEN 'active'
+    WHEN 8 THEN 'terminated'
+  END ) STORED,
   published_deal_meta JSONB NOT NULL DEFAULT '{}',
   start_epoch INTEGER NOT NULL CONSTRAINT deal_valid_start CHECK ( start_epoch > 0 ),
   end_epoch INTEGER NOT NULL CONSTRAINT deal_valid_end CHECK ( end_epoch > 0 ),
@@ -148,7 +153,7 @@ CREATE TABLE IF NOT EXISTS naive.published_deals (
 );
 CREATE INDEX IF NOT EXISTS published_deals_piece_id_idx ON naive.published_deals ( piece_id );
 CREATE INDEX IF NOT EXISTS published_deals_status ON naive.published_deals ( status, piece_id, is_filplus, provider_id );
-CREATE INDEX IF NOT EXISTS published_deals_live ON naive.published_deals ( piece_id ) WHERE ( status != 'terminated' );
+CREATE INDEX IF NOT EXISTS published_deals_live ON naive.published_deals ( piece_id ) WHERE ( state < 8 );
 CREATE OR REPLACE
   FUNCTION naive.init_deal_relations() RETURNS TRIGGER
     LANGUAGE plpgsql
