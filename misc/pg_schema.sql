@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS naive.published_deals (
 );
 CREATE INDEX IF NOT EXISTS published_deals_piece_id_idx ON naive.published_deals ( piece_id );
 CREATE INDEX IF NOT EXISTS published_deals_status ON naive.published_deals ( status, piece_id, is_filplus, provider_id );
+CREATE INDEX IF NOT EXISTS published_deals_state ON naive.published_deals ( state, provider_id ) INCLUDE ( piece_id );
 CREATE INDEX IF NOT EXISTS published_deals_live ON naive.published_deals ( piece_id ) WHERE ( state < 8 );
 CREATE OR REPLACE
   FUNCTION naive.init_deal_relations() RETURNS TRIGGER
@@ -169,3 +170,127 @@ CREATE OR REPLACE TRIGGER trigger_init_deal_relations
   FOR EACH ROW
   EXECUTE PROCEDURE naive.init_deal_relations()
 ;
+
+CREATE OR REPLACE VIEW naive.storage_stats AS (
+  WITH
+    private_sps AS MATERIALIZED (
+      SELECT provider_id FROM naive.providers_info WHERE info_dialing_peerid IS NULL
+    ),
+    total AS (
+      SELECT(
+        (
+          SELECT JSONB_BUILD_OBJECT(
+            'total_unique_clients', COUNT( DISTINCT( client_id )),
+            'total_unique_providers', COUNT( DISTINCT( provider_id )),
+            'total_num_deals', COUNT(*),
+            'total_stored_data_size', SUM( 1::BIGINT<<claimed_log2_size ),
+            'total_fraction_of_raw_capacity', (
+              ( SUM( 1::BIGINT<<claimed_log2_size )::NUMERIC )
+                /
+              ( SELECT (metadata->'market_state'->>'total_raw_capacity' )::NUMERIC FROM naive.global )
+            )::NUMERIC( 10, 9 )
+          ) FROM naive.published_deals WHERE state = 3
+        )
+          ||
+        (
+          SELECT JSONB_BUILD_OBJECT(
+            'total_unique_cids', COUNT( piece_id ),
+            'total_unique_data_size', SUM( 1::BIGINT<<proven_log2_size )
+          ) FROM naive.pieces WHERE piece_id IN ( SELECT piece_id FROM naive.published_deals WHERE state = 3 )
+        )
+      ) AS summary
+    ),
+    total_filp AS (
+      SELECT(
+        (
+          SELECT JSONB_BUILD_OBJECT(
+            'total_unique_clients', COUNT( DISTINCT( client_id )),
+            'total_unique_providers', COUNT( DISTINCT( provider_id )),
+            'total_num_deals', COUNT(*),
+            'total_stored_data_size', SUM( 1::BIGINT<<claimed_log2_size ),
+            'total_fraction_of_raw_capacity', (
+              ( SUM( 1::BIGINT<<claimed_log2_size )::NUMERIC )
+                /
+              ( SELECT (metadata->'market_state'->>'total_raw_capacity' )::NUMERIC FROM naive.global )
+            )::NUMERIC( 10, 9 )
+          ) FROM naive.published_deals WHERE state = 3 AND is_filplus
+        )
+          ||
+        (
+          SELECT JSONB_BUILD_OBJECT(
+            'total_unique_cids', COUNT( piece_id ),
+            'total_unique_data_size', SUM( 1::BIGINT<<proven_log2_size )
+          ) FROM naive.pieces WHERE piece_id IN ( SELECT piece_id FROM naive.published_deals WHERE state = 3 AND is_filplus )
+        )
+      ) AS summary
+    ),
+    total_filp_private AS (
+      SELECT(
+        (
+          SELECT JSONB_BUILD_OBJECT(
+            'total_unique_clients', COUNT( DISTINCT( client_id )),
+            'total_unique_providers', COUNT( DISTINCT( provider_id )),
+            'total_num_deals', COUNT(*),
+            'total_stored_data_size', SUM( 1::BIGINT<<claimed_log2_size ),
+            'total_fraction_of_raw_capacity', (
+              ( SUM( 1::BIGINT<<claimed_log2_size )::NUMERIC )
+                /
+              ( SELECT (metadata->'market_state'->>'total_raw_capacity' )::NUMERIC FROM naive.global )
+            )::NUMERIC( 10, 9 )
+
+          ) FROM naive.published_deals JOIN private_sps USING (provider_id) WHERE state = 3 AND is_filplus
+        )
+          ||
+        (
+          SELECT JSONB_BUILD_OBJECT(
+            'total_unique_cids', COUNT( piece_id ),
+            'total_unique_data_size', SUM( 1::BIGINT<<proven_log2_size )
+          ) FROM naive.pieces WHERE piece_id IN ( SELECT piece_id FROM naive.published_deals JOIN private_sps USING (provider_id) WHERE state = 3 AND is_filplus )
+        )
+      ) AS summary
+    ),
+    total_private AS (
+      SELECT(
+        (
+          SELECT JSONB_BUILD_OBJECT(
+            'total_unique_clients', COUNT( DISTINCT( client_id )),
+            'total_unique_providers', COUNT( DISTINCT( provider_id )),
+            'total_num_deals', COUNT(*),
+            'total_stored_data_size', SUM( 1::BIGINT<<claimed_log2_size ),
+            'total_fraction_of_raw_capacity', (
+              ( SUM( 1::BIGINT<<claimed_log2_size )::NUMERIC )
+                /
+              ( SELECT (metadata->'market_state'->>'total_raw_capacity' )::NUMERIC FROM naive.global )
+            )::NUMERIC( 10, 9 )
+          ) FROM naive.published_deals JOIN private_sps USING (provider_id) WHERE state = 3
+        )
+          ||
+        (
+          SELECT JSONB_BUILD_OBJECT(
+            'total_unique_cids', COUNT( piece_id ),
+            'total_unique_data_size', SUM( 1::BIGINT<<proven_log2_size )
+          ) FROM naive.pieces WHERE piece_id IN ( SELECT piece_id FROM naive.published_deals JOIN private_sps USING (provider_id) WHERE state = 3 )
+        )
+      ) AS summary
+    ),
+    state AS (
+      SELECT
+        (metadata->'market_state'->'epoch')::INTEGER AS epoch,
+        metadata->'market_state'->>'total_raw_capacity' AS total_raw,
+        metadata->'market_state'->>'total_qa_power' AS total_qap
+      FROM naive.global
+    )
+  SELECT JSONB_BUILD_OBJECT(
+    'epoch', state.epoch,
+    'timestamp', naive.ts_from_epoch( state.epoch ),
+    'endpoint', 'NETWORK_WIDE_TOTALS',
+    'payload', total.summary || JSONB_BUILD_OBJECT(
+      'total_qa_power', state.total_qap,
+      'total_raw_capacity', state.total_raw,
+      'filplus_subset', total_filp.summary,
+      'filplus_private_subset', total_filp_private.summary,
+      'private_subset', total_private.summary
+    )
+  ) AS stats
+    FROM state, total, total_filp, total_filp_private, total_private
+);

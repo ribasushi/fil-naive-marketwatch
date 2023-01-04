@@ -65,6 +65,11 @@ var trackDeals = &ufcli.Command{
 			log.Infof("retrieved %s state deal records", humanize.Comma(int64(len(stateDeals))))
 		}()
 
+		netPower, err := lapi.StateMinerPower(ctx, filaddr.Address{}, curTipset.Key())
+		if err != nil {
+			return cmn.WrErr(err)
+		}
+
 		type filDeal struct {
 			pieceCid cid.Cid
 			state    dealState
@@ -169,6 +174,9 @@ var trackDeals = &ufcli.Command{
 				d.state = dealTerminated
 				d.terminationReason = "entered on-chain final-slashed state"
 			} else if d.State.SectorStartEpoch > 0 {
+				if d.State.SectorStartEpoch > curTipset.Height() {
+					log.Warnf("illegal future start epoch(%d) after current epoch(%d) for deal %d", d.State.SectorStartEpoch, curTipset.Height(), d.dealID)
+				}
 				d.sectorStart = &d.State.SectorStartEpoch
 				d.state = dealActive
 			} else if d.Proposal.StartEpoch+filbuiltin.EpochsInDay < curTipset.Height() { // FIXME replace with DealUpdatesInterval
@@ -345,11 +353,15 @@ var trackDeals = &ufcli.Command{
 			}
 
 			msJ, _ := json.Marshal(struct {
-				Epoch  filabi.ChainEpoch    `json:"epoch"`
-				Tipset lotustypes.TipSetKey `json:"tipset"`
+				Epoch    filabi.ChainEpoch    `json:"epoch"`
+				Tipset   lotustypes.TipSetKey `json:"tipset"`
+				QaPower  filabi.StoragePower  `json:"total_qa_power"`
+				RawPower filabi.StoragePower  `json:"total_raw_capacity"`
 			}{
-				Epoch:  curTipset.Height(),
-				Tipset: curTipset.Key(),
+				Epoch:    curTipset.Height(),
+				Tipset:   curTipset.Key(),
+				QaPower:  netPower.TotalPower.QualityAdjPower,
+				RawPower: netPower.TotalPower.RawBytePower,
 			})
 
 			if _, err := tx.Exec(

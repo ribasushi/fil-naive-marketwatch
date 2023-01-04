@@ -16,6 +16,7 @@ use SQL::Translator;
     naming => 'v8',
     db_schema => 'naive',
     qualify_objects => 1,
+    exclude => qr/^(?: storage_stats )/x,
   );
 }
 
@@ -45,7 +46,7 @@ delete $schema->source('Provider')->{_relationships}{$_} for qw( providers_info 
 
 use Devel::Dwarn;
 
-my $views = [qw( known_fildag_deals_ranked known_missized_deals )];
+my $views = [qw( )];
 
 my $trans = SQL::Translator->new(
     parser        => 'SQL::Translator::Parser::DBIx::Class',
